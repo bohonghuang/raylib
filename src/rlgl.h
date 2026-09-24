@@ -1039,6 +1039,7 @@ typedef struct rlglData {
 
     struct {
         int vertexCounter;                  // Current active render batch vertex counter (generic, used for all batches)
+        int indexCounter;                   // Current render batch index counter (QUADS/QUAD_STRIP quads write 6 indices sequentially)
         float texcoordx, texcoordy;         // Current active texture coordinate (added on glVertex*())
         float normalx, normaly, normalz;    // Current active normal (added on glVertex*())
         unsigned char colorr, colorg, colorb, colora;   // Current active color (added on glVertex*())
@@ -1529,34 +1530,22 @@ void rlVertex3f(float x, float y, float z)
 #define indices RLGL.currentBatch->vertexBuffer[RLGL.currentBatch->currentBuffer].indices
         case RL_QUADS:
             if (overflow && count%4 == 0) rlCheckRenderBatchLimit(4 + 1);
-            if (count%4 == 3)
+            if (count%4 == 3)   // Quad completed: append its 6 indices
             {
-                int idx = count/4*6;   // Quads of this element already closed
-                for (int i = 0; i < RLGL.currentBatch->drawCounter - 1; i++)
-                {
-                    int m = RLGL.currentBatch->draws[i].mode, c = RLGL.currentBatch->draws[i].vertexCount;
-                    if (m == RL_QUADS) idx += c/4*6;
-                    else if (m == RL_QUAD_STRIP) idx += ((c >= 4)? (c - 2)*2 : 0)/4*6;
-                }
                 unsigned int v = RLGL.State.vertexCounter - 3;   // First vertex of the completed quad
-                indices[idx] = v; indices[idx + 1] = v + 1; indices[idx + 2] = v + 2;
-                indices[idx + 3] = v; indices[idx + 4] = v + 2; indices[idx + 5] = v + 3;
+                indices[RLGL.State.indexCounter] = v; indices[RLGL.State.indexCounter + 1] = v + 1; indices[RLGL.State.indexCounter + 2] = v + 2;
+                indices[RLGL.State.indexCounter + 3] = v; indices[RLGL.State.indexCounter + 4] = v + 2; indices[RLGL.State.indexCounter + 5] = v + 3;
+                RLGL.State.indexCounter += 6;
             }
             break;
         case RL_QUAD_STRIP:
             if (overflow && count%2 == 0) rlCheckRenderBatchLimit(2 + 1);   // Split strips at even vertexCount
-            if (count >= 3 && count%2 == 1)
+            if (count >= 3 && count%2 == 1)   // Quad completed: append its 6 indices
             {
-                int idx = (count - 3)/2*6;   // Quads of this element already closed
-                for (int i = 0; i < RLGL.currentBatch->drawCounter - 1; i++)
-                {
-                    int m = RLGL.currentBatch->draws[i].mode, c = RLGL.currentBatch->draws[i].vertexCount;
-                    if (m == RL_QUADS) idx += c/4*6;
-                    else if (m == RL_QUAD_STRIP) idx += ((c >= 4)? (c - 2)*2 : 0)/4*6;
-                }
                 unsigned int v = RLGL.State.vertexCounter - 3;   // First vertex of the completed quad
-                indices[idx] = v; indices[idx + 1] = v + 1; indices[idx + 2] = v + 2;
-                indices[idx + 3] = v + 1; indices[idx + 4] = v + 3; indices[idx + 5] = v + 2;   // Shared diagonal v+1--v+2
+                indices[RLGL.State.indexCounter] = v; indices[RLGL.State.indexCounter + 1] = v + 1; indices[RLGL.State.indexCounter + 2] = v + 2;
+                indices[RLGL.State.indexCounter + 3] = v + 1; indices[RLGL.State.indexCounter + 4] = v + 3; indices[RLGL.State.indexCounter + 5] = v + 2;   // Shared diagonal v+1--v+2
+                RLGL.State.indexCounter += 6;
             }
             break;
 #undef indices
@@ -2835,6 +2824,7 @@ rlRenderBatch rlLoadRenderBatch(int numBuffers, int bufferElements)
         for (int j = 0; j < (4*4*bufferElements); j++) batch.vertexBuffer[i].colors[j] = 0;
 
         RLGL.State.vertexCounter = 0;
+        RLGL.State.indexCounter = 0;
     }
 
     TRACELOG(RL_LOG_INFO, "RLGL: Render batch vertex buffers loaded successfully in RAM (CPU)");
@@ -3021,10 +3011,10 @@ void rlDrawRenderBatch(rlRenderBatch *batch)
         // Upload indices built on the fly during batching (QUADS/QUAD_STRIP)
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, batch->vertexBuffer[batch->currentBuffer].vboId[4]);
 #if defined(GRAPHICS_API_OPENGL_33)
-        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, RLGL.State.vertexCounter/2*6*sizeof(unsigned int), batch->vertexBuffer[batch->currentBuffer].indices);
+        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, RLGL.State.indexCounter*sizeof(unsigned int), batch->vertexBuffer[batch->currentBuffer].indices);
 #endif
 #if defined(GRAPHICS_API_OPENGL_ES2)
-        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, RLGL.State.vertexCounter/2*6*sizeof(unsigned short), batch->vertexBuffer[batch->currentBuffer].indices);
+        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, RLGL.State.indexCounter*sizeof(unsigned short), batch->vertexBuffer[batch->currentBuffer].indices);
 #endif
 
         // Unbind the current VAO
@@ -3145,9 +3135,9 @@ void rlDrawRenderBatch(rlRenderBatch *batch)
                         glDrawArrays(batch->draws[i].mode, vertexOffset, count);
                         break;
                     // RL_QUADS / RL_QUAD_STRIP: draw the element's slice of the sequentially built index buffer
-                    case RL_QUAD_STRIP:;
-                        count = (count >= 4)? (count - 2)*2 : 0;
-                    case RL_QUADS:;
+                    case RL_QUAD_STRIP:
+                        count = (count >= 4)? (count - 2)*2 : 0;   // Only interior pairs form quads
+                    case RL_QUADS:
                         count = count/4*6;
 #if defined(GRAPHICS_API_OPENGL_33)
                         glDrawElements(GL_TRIANGLES, count, GL_UNSIGNED_INT, (GLvoid *)(indexOffset*sizeof(GLuint)));
@@ -3182,8 +3172,9 @@ void rlDrawRenderBatch(rlRenderBatch *batch)
 
     // Reset batch buffers
     //------------------------------------------------------------------------------------------------------------
-    // Reset vertex counter for next frame
+    // Reset vertex/index counters for next frame
     RLGL.State.vertexCounter = 0;
+    RLGL.State.indexCounter = 0;
 
     // Reset depth for next draw
     batch->currentDepth = -1.0f;
