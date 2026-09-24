@@ -1535,7 +1535,8 @@ void rlVertex3f(float x, float y, float z)
                 for (int i = 0; i < RLGL.currentBatch->drawCounter - 1; i++)
                 {
                     int m = RLGL.currentBatch->draws[i].mode, c = RLGL.currentBatch->draws[i].vertexCount;
-                    idx += c/4*6;
+                    if (m == RL_QUADS) idx += c/4*6;
+                    else if (m == RL_QUAD_STRIP) idx += ((c >= 4)? (c - 2)*2 : 0)/4*6;
                 }
                 unsigned int v = RLGL.State.vertexCounter - 3;   // First vertex of the completed quad
                 indices[idx] = v; indices[idx + 1] = v + 1; indices[idx + 2] = v + 2;
@@ -1550,7 +1551,8 @@ void rlVertex3f(float x, float y, float z)
                 for (int i = 0; i < RLGL.currentBatch->drawCounter - 1; i++)
                 {
                     int m = RLGL.currentBatch->draws[i].mode, c = RLGL.currentBatch->draws[i].vertexCount;
-                    idx += (c >= 4)? (c - 2)/2*6 : 0;
+                    if (m == RL_QUADS) idx += c/4*6;
+                    else if (m == RL_QUAD_STRIP) idx += ((c >= 4)? (c - 2)*2 : 0)/4*6;
                 }
                 unsigned int v = RLGL.State.vertexCounter - 3;   // First vertex of the completed quad
                 indices[idx] = v; indices[idx + 1] = v + 1; indices[idx + 2] = v + 2;
