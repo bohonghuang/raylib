@@ -267,11 +267,16 @@
 #define RL_TEXTURE                              0x1702      // GL_TEXTURE
 
 // Primitive assembly draw modes
+#define RL_POINTS                               0x0000      // GL_POINTS
 #define RL_LINES                                0x0001      // GL_LINES
+#define RL_LINE_LOOP                            0x0002      // GL_LINE_LOOP
+#define RL_LINE_STRIP                           0x0003      // GL_LINE_STRIP
 #define RL_TRIANGLES                            0x0004      // GL_TRIANGLES
 #define RL_TRIANGLE_STRIP                       0x0005      // GL_TRIANGLE_STRIP
+#define RL_TRIANGLE_FAN                         0x0006      // GL_TRIANGLE_FAN
 #define RL_QUADS                                0x0007      // GL_QUADS
 #define RL_QUAD_STRIP                           0x0008      // GL_QUAD_STRIP
+#define RL_POLYGON                              0x0009      // GL_POLYGON (drawn as RL_TRIANGLE_FAN)
 
 // GL equivalent data types
 #define RL_UNSIGNED_BYTE                        0x1401      // GL_UNSIGNED_BYTE
@@ -1433,10 +1438,15 @@ void rlBegin(int mode)
 {
     switch (mode)
     {
+        case RL_POINTS: glBegin(GL_POINTS); break;
         case RL_LINES: glBegin(GL_LINES); break;
+        case RL_LINE_LOOP: glBegin(GL_LINE_LOOP); break;
+        case RL_LINE_STRIP: glBegin(GL_LINE_STRIP); break;
         case RL_TRIANGLES: glBegin(GL_TRIANGLES); break;
-        case RL_QUADS: glBegin(GL_QUADS); break;
         case RL_TRIANGLE_STRIP: glBegin(GL_TRIANGLE_STRIP); break;
+        case RL_TRIANGLE_FAN:
+        case RL_POLYGON: glBegin(GL_TRIANGLE_FAN); break;
+        case RL_QUADS: glBegin(GL_QUADS); break;
         case RL_QUAD_STRIP: glBegin(GL_QUAD_STRIP); break;
         default: break;
     }
@@ -1518,14 +1528,26 @@ void rlVertex3f(float x, float y, float z)
     int count = RLGL.currentBatch->draws[RLGL.currentBatch->drawCounter - 1].vertexCount;
     switch (mode)
     {
+        case RL_POINTS:
+            if (overflow && count%1 == 0) rlCheckRenderBatchLimit(1 + 1);
+            break;
         case RL_LINES:
             if (overflow && count%2 == 0) rlCheckRenderBatchLimit(2 + 1);   // Keep current state for next vertices comming
+            break;
+        case RL_LINE_LOOP:
+            if (overflow && count%2 == 0) rlCheckRenderBatchLimit(2 + 1);
+            break;
+        case RL_LINE_STRIP:
+            if (overflow && count%2 == 0) rlCheckRenderBatchLimit(2 + 1);   // Split strips at even vertexCount
             break;
         case RL_TRIANGLES:
             if (overflow && count%3 == 0) rlCheckRenderBatchLimit(3 + 1);
             break;
         case RL_TRIANGLE_STRIP:
             if (overflow && count%2 == 0) rlCheckRenderBatchLimit(2 + 1);   // Split strips at even vertexCount
+            break;
+        case RL_TRIANGLE_FAN:
+            if (overflow && count%1 == 0) rlCheckRenderBatchLimit(3 + 1);
             break;
 #define indices RLGL.currentBatch->vertexBuffer[RLGL.currentBatch->currentBuffer].indices
         case RL_QUADS:
@@ -3129,10 +3151,17 @@ void rlDrawRenderBatch(rlRenderBatch *batch)
                 int count = batch->draws[i].vertexCount;
                 switch (batch->draws[i].mode)
                 {
+                    case RL_POINTS:
                     case RL_LINES:
+                    case RL_LINE_LOOP:
+                    case RL_LINE_STRIP:
                     case RL_TRIANGLES:
                     case RL_TRIANGLE_STRIP:
                         glDrawArrays(batch->draws[i].mode, vertexOffset, count);
+                        break;
+                    case RL_TRIANGLE_FAN:
+                    case RL_POLYGON:   // GL_POLYGON is drawn as a triangle fan (no GL_POLYGON in GL33/ES2)
+                        glDrawArrays(RL_TRIANGLE_FAN, vertexOffset, count);
                         break;
                     // RL_QUADS / RL_QUAD_STRIP: draw the element's slice of the sequentially built index buffer
                     case RL_QUAD_STRIP:

@@ -255,14 +255,14 @@ typedef double              GLclampd;
 
 #define GL_POINTS                           0x0000
 #define GL_LINES                            0x0001
-//#define GL_LINE_LOOP                      0x0002
-//#define GL_LINE_STRIP                     0x0003
+#define GL_LINE_LOOP                        0x0002
+#define GL_LINE_STRIP                       0x0003
 #define GL_TRIANGLES                        0x0004
 #define GL_TRIANGLE_STRIP                   0x0005
-//#define GL_TRIANGLE_FAN                   0x0006
+#define GL_TRIANGLE_FAN                     0x0006
 #define GL_QUADS                            0x0007
 #define GL_QUAD_STRIP                       0x0008
-//#define GL_POLYGON                        0x0009
+#define GL_POLYGON                          0x0009
 
 #define GL_POINT                            0x1B00
 #define GL_LINE                             0x1B01
@@ -553,10 +553,14 @@ typedef enum {
     SW_DRAW_INVALID = -1,
     SW_POINTS = GL_POINTS,
     SW_LINES = GL_LINES,
+    SW_LINE_LOOP = GL_LINE_LOOP,
+    SW_LINE_STRIP = GL_LINE_STRIP,
     SW_TRIANGLES = GL_TRIANGLES,
-    SW_QUADS = GL_QUADS,
     SW_TRIANGLE_STRIP = GL_TRIANGLE_STRIP,
-    SW_QUAD_STRIP = GL_QUAD_STRIP
+    SW_TRIANGLE_FAN = GL_TRIANGLE_FAN,
+    SW_QUADS = GL_QUADS,
+    SW_QUAD_STRIP = GL_QUAD_STRIP,
+    SW_POLYGON = GL_POLYGON
 } SWdraw;
 
 typedef enum {
@@ -1167,10 +1171,14 @@ static const int SW_PRIMITIVE_VERTEX_COUNT[] =
     // Remember that this is acceptable; these are small indices
     [SW_POINTS]         = 1,
     [SW_LINES]          = 2,
+    [SW_LINE_LOOP]      = 2,
+    [SW_LINE_STRIP]     = 2,
     [SW_TRIANGLES]      = 3,
-    [SW_QUADS]          = 4,
     [SW_TRIANGLE_STRIP] = 3,
+    [SW_TRIANGLE_FAN]   = 3,
+    [SW_QUADS]          = 4,
     [SW_QUAD_STRIP]     = 4,
+    [SW_POLYGON]        = 3,
 };
 
 //----------------------------------------------------------------------------------
@@ -1599,14 +1607,17 @@ static SW_INLINE bool sw_is_texture_wrap_valid(int wrap)
 static bool sw_is_draw_mode_valid(int mode)
 {
     bool result = false;
-
     switch (mode)
     {
         case SW_POINTS:
         case SW_LINES:
+        case SW_LINE_LOOP:
+        case SW_LINE_STRIP:
         case SW_TRIANGLES:
         case SW_QUADS: result = true; break;
         case SW_TRIANGLE_STRIP:
+        case SW_TRIANGLE_FAN:
+        case SW_POLYGON:
         case SW_QUAD_STRIP: result = true; break;
         default: break;
     }
@@ -3744,10 +3755,14 @@ static void sw_poly_fill_render(uint32_t state)
     switch (RLSW.drawMode)
     {
         case SW_POINTS: sw_point_render(state, &RLSW.primitive.buffer[0]); break;
-        case SW_LINES: sw_line_render(state, RLSW.primitive.buffer); break;
-        case SW_TRIANGLES: sw_triangle_render(state); break;
-        case SW_QUADS: sw_quad_render(state); break;
-        case SW_TRIANGLE_STRIP: sw_triangle_render(state); break;
+        case SW_LINES:
+        case SW_LINE_LOOP:
+        case SW_LINE_STRIP: sw_line_render(state, RLSW.primitive.buffer); break;
+        case SW_TRIANGLES:
+        case SW_TRIANGLE_STRIP:
+        case SW_TRIANGLE_FAN:
+        case SW_POLYGON: sw_triangle_render(state); break;
+        case SW_QUADS:
         case SW_QUAD_STRIP: sw_quad_render(state); break;
         default: break;
     }
@@ -3858,6 +3873,12 @@ static void sw_immediate_push_vertex(const float position[4])
         case SW_QUAD_STRIP:
             vertex = &RLSW.primitive.buffer[RLSW.primitive.vertexCount >= 2 ? 2 + (RLSW.primitive.vertexCount & 1) : RLSW.primitive.vertexCount];
             break;
+        case SW_TRIANGLE_FAN:
+        case SW_POLYGON:
+        case SW_LINE_LOOP:
+        case SW_LINE_STRIP:
+            vertex = &RLSW.primitive.buffer[RLSW.primitive.vertexCount >= 2 ? 2 : RLSW.primitive.vertexCount];
+            break;
         default:
             vertex = &RLSW.primitive.buffer[RLSW.primitive.vertexCount];
             break;
@@ -3880,6 +3901,10 @@ static void sw_immediate_push_vertex(const float position[4])
     // Copy the attributes in the current vertex
     for (int i = 0; i < 4; i++) vertex->color[i] = RLSW.primitive.color[i];
     for (int i = 0; i < 2; i++) vertex->texcoord[i] = RLSW.primitive.texcoord[i];
+
+    // LINE_LOOP keeps the polygon's first vertex in slot 2 (outside the line
+    // window) as the closure anchor rendered on swEnd
+    if ((RLSW.drawMode == SW_LINE_LOOP) && (RLSW.primitive.vertexCount == 1)) RLSW.primitive.buffer[2] = *vertex;
 
     // Track whether any vertex in this primitive has alpha < 1.0
     RLSW.primitive.hasColorAlpha |= (vertex->color[3] < 1.0f);
@@ -3934,6 +3959,32 @@ static void sw_immediate_push_vertex(const float position[4])
                 RLSW.primitive.vertexCount = 2 + (seed & 1);
                 RLSW.primitive.hasColorAlpha = (vertices_next[0].color[3] < 1.0f) || (vertices_next[1].color[3] < 1.0f);
                 break;
+            // Fans re-seed from the fixed hub (slot 0) plus the last rim vertex;
+            // line strips/loops re-seed from the last segment's end vertex only
+            case SW_TRIANGLE_FAN:
+            case SW_POLYGON:;
+                sw_vertex_t fan_hub = RLSW.primitive.buffer[0];
+                sw_vertex_t fan_rim = RLSW.primitive.buffer[window - 1];
+
+                sw_immediate_render(state, window);
+
+                RLSW.primitive.buffer[0] = fan_hub;
+                RLSW.primitive.buffer[1] = fan_rim;
+                RLSW.primitive.vertexCount = 2;      // Hub + last rim: next vertex completes a fan triangle
+                RLSW.primitive.hasColorAlpha = (fan_hub.color[3] < 1.0f) || (fan_rim.color[3] < 1.0f);
+                break;
+            case SW_LINE_LOOP:
+            case SW_LINE_STRIP:;
+                // LINE_LOOP's closure anchor was saved in slot 2 at the first
+                // push; the line window (slots 0-1) never touches it
+                sw_vertex_t line_end = RLSW.primitive.buffer[window - 1];
+
+                sw_immediate_render(state, window);
+
+                RLSW.primitive.buffer[0] = line_end;
+                RLSW.primitive.vertexCount = 1;
+                RLSW.primitive.hasColorAlpha |= (line_end.color[3] < 1.0f);
+                break;
             default:
                 sw_immediate_render(state, window);
                 RLSW.primitive.hasColorAlpha = false;
@@ -3945,6 +3996,32 @@ static void sw_immediate_push_vertex(const float position[4])
 
 static void sw_immediate_end(void)
 {
+    // LINE_LOOP closes the polygon with a final segment from the last vertex
+    // back to the first one (kept as anchor in slot 2); only a single pushed
+    // vertex leaves the anchor identical to the last vertex, matching the GL
+    // rule of not drawing degenerate (zero-length) closing segments
+    if (RLSW.drawMode == SW_LINE_LOOP)
+    {
+        bool degenerate = true;
+        for (int i = 0; i < 4; i++) degenerate &= (RLSW.primitive.buffer[0].position[i] == RLSW.primitive.buffer[2].position[i]);
+
+        if (!degenerate)
+        {
+            sw_vertex_t verts[2] = { RLSW.primitive.buffer[0], RLSW.primitive.buffer[2] };
+            RLSW.primitive.vertexCount = 2;
+            uint32_t state = RLSW.rasterState;
+            if (state & SW_STATE_BLEND)
+            {
+                if (RLSW.blendFlags & SW_BLEND_FLAG_NOOP) state &= ~SW_STATE_BLEND;
+                else if ((RLSW.blendFlags & SW_BLEND_FLAG_NEEDS_ALPHA) && (!RLSW.primitive.hasColorAlpha))
+                {
+                    if (!(state & SW_STATE_TEXTURE_2D) || (RLSW.boundTexture->alpha == SW_PIXEL_ALPHA_NONE)) state &= ~SW_STATE_BLEND;
+                }
+            }
+            sw_line_render(state, verts);
+        }
+    }
+
     RLSW.drawMode = SW_DRAW_INVALID;
 }
 
