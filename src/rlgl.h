@@ -269,7 +269,9 @@
 // Primitive assembly draw modes
 #define RL_LINES                                0x0001      // GL_LINES
 #define RL_TRIANGLES                            0x0004      // GL_TRIANGLES
+#define RL_TRIANGLE_STRIP                       0x0005      // GL_TRIANGLE_STRIP
 #define RL_QUADS                                0x0007      // GL_QUADS
+#define RL_QUAD_STRIP                           0x0008      // GL_QUAD_STRIP
 
 // GL equivalent data types
 #define RL_UNSIGNED_BYTE                        0x1401      // GL_UNSIGNED_BYTE
@@ -405,7 +407,7 @@ typedef struct rlVertexBuffer {
 // used at this moment (vaoId, shaderId, matrices), raylib forces a batch draw call if any
 // of those state-change happens (this is done in core module)
 typedef struct rlDrawCall {
-    int mode;                   // Drawing mode: LINES, TRIANGLES, QUADS
+    int mode;                   // Drawing mode: LINES, TRIANGLES, QUADS, TRIANGLE_STRIP, QUAD_STRIP
     int vertexCount;            // Number of vertex of the draw
     int vertexAlignment;        // Number of vertex required for index alignment (LINES, TRIANGLES)
     //unsigned int vaoId;       // Vertex array id to be used on the draw -> Using RLGL.currentBatch->vertexBuffer.vaoId
@@ -1433,6 +1435,8 @@ void rlBegin(int mode)
         case RL_LINES: glBegin(GL_LINES); break;
         case RL_TRIANGLES: glBegin(GL_TRIANGLES); break;
         case RL_QUADS: glBegin(GL_QUADS); break;
+        case RL_TRIANGLE_STRIP: glBegin(GL_TRIANGLE_STRIP); break;
+        case RL_QUAD_STRIP: glBegin(GL_QUAD_STRIP); break;
         default: break;
     }
 }
@@ -1451,7 +1455,6 @@ void rlColor4f(float x, float y, float z, float w) { glColor4f(x, y, z, w); }
 // Initialize drawing mode (how to organize vertex)
 void rlBegin(int mode)
 {
-    // Draw mode can be RL_LINES, RL_TRIANGLES and RL_QUADS
     // NOTE: In all three cases, vertex are accumulated over default internal vertex buffer
     if (RLGL.currentBatch->draws[RLGL.currentBatch->drawCounter - 1].mode != mode)
     {
@@ -1507,28 +1510,54 @@ void rlVertex3f(float x, float y, float z)
     }
 
     // WARNING: Be careful with primitives breaking when launching a new batch!
-    // RL_LINES comes in pairs, RL_TRIANGLES come in groups of 3 vertices and RL_QUADS come in groups of 4 vertices
-    // Checking current draw.mode when a new vertex is required and finish the batch only if the draw.mode draw.vertexCount is %2, %3 or %4
-    if (RLGL.State.vertexCounter > (RLGL.currentBatch->vertexBuffer[RLGL.currentBatch->currentBuffer].elementCount*4 - 4))
+    // RL_LINES comes in pairs, RL_TRIANGLES come in groups of 3 vertices, RL_QUADS come in groups of 4 vertices
+    // Strip modes (RL_TRIANGLE_STRIP, RL_QUAD_STRIP) emit vertices in pairs
+    bool overflow = RLGL.State.vertexCounter > (RLGL.currentBatch->vertexBuffer[RLGL.currentBatch->currentBuffer].elementCount*4 - 4);
+    int mode = RLGL.currentBatch->draws[RLGL.currentBatch->drawCounter - 1].mode;
+    int count = RLGL.currentBatch->draws[RLGL.currentBatch->drawCounter - 1].vertexCount;
+    switch (mode)
     {
-        if ((RLGL.currentBatch->draws[RLGL.currentBatch->drawCounter - 1].mode == RL_LINES) &&
-            (RLGL.currentBatch->draws[RLGL.currentBatch->drawCounter - 1].vertexCount%2 == 0))
-        {
-            // Reached the maximum number of vertices for RL_LINES drawing
-            // Launch a draw call but keep current state for next vertices comming
-            // NOTE: Adding +1 vertex to the check for some safety
-            rlCheckRenderBatchLimit(2 + 1);
-        }
-        else if ((RLGL.currentBatch->draws[RLGL.currentBatch->drawCounter - 1].mode == RL_TRIANGLES) &&
-            (RLGL.currentBatch->draws[RLGL.currentBatch->drawCounter - 1].vertexCount%3 == 0))
-        {
-            rlCheckRenderBatchLimit(3 + 1);
-        }
-        else if ((RLGL.currentBatch->draws[RLGL.currentBatch->drawCounter - 1].mode == RL_QUADS) &&
-            (RLGL.currentBatch->draws[RLGL.currentBatch->drawCounter - 1].vertexCount%4 == 0))
-        {
-            rlCheckRenderBatchLimit(4 + 1);
-        }
+        case RL_LINES:
+            if (overflow && count%2 == 0) rlCheckRenderBatchLimit(2 + 1);   // Keep current state for next vertices comming
+            break;
+        case RL_TRIANGLES:
+            if (overflow && count%3 == 0) rlCheckRenderBatchLimit(3 + 1);
+            break;
+        case RL_TRIANGLE_STRIP:
+            if (overflow && count%2 == 0) rlCheckRenderBatchLimit(2 + 1);   // Split strips at even vertexCount
+            break;
+#define indices RLGL.currentBatch->vertexBuffer[RLGL.currentBatch->currentBuffer].indices
+        case RL_QUADS:
+            if (overflow && count%4 == 0) rlCheckRenderBatchLimit(4 + 1);
+            if (count%4 == 3)
+            {
+                int idx = count/4*6;   // Quads of this element already closed
+                for (int i = 0; i < RLGL.currentBatch->drawCounter - 1; i++)
+                {
+                    int m = RLGL.currentBatch->draws[i].mode, c = RLGL.currentBatch->draws[i].vertexCount;
+                    idx += c/4*6;
+                }
+                unsigned int v = RLGL.State.vertexCounter - 3;   // First vertex of the completed quad
+                indices[idx] = v; indices[idx + 1] = v + 1; indices[idx + 2] = v + 2;
+                indices[idx + 3] = v; indices[idx + 4] = v + 2; indices[idx + 5] = v + 3;
+            }
+            break;
+        case RL_QUAD_STRIP:
+            if (overflow && count%2 == 0) rlCheckRenderBatchLimit(2 + 1);   // Split strips at even vertexCount
+            if (count >= 3 && count%2 == 1)
+            {
+                int idx = (count - 3)/2*6;   // Quads of this element already closed
+                for (int i = 0; i < RLGL.currentBatch->drawCounter - 1; i++)
+                {
+                    int m = RLGL.currentBatch->draws[i].mode, c = RLGL.currentBatch->draws[i].vertexCount;
+                    idx += (c >= 4)? (c - 2)/2*6 : 0;
+                }
+                unsigned int v = RLGL.State.vertexCounter - 3;   // First vertex of the completed quad
+                indices[idx] = v; indices[idx + 1] = v + 1; indices[idx + 2] = v + 2;
+                indices[idx + 3] = v + 1; indices[idx + 4] = v + 3; indices[idx + 5] = v + 2;   // Shared diagonal v+1--v+2
+            }
+            break;
+#undef indices
     }
 
     // Add vertices
@@ -2793,31 +2822,15 @@ rlRenderBatch rlLoadRenderBatch(int numBuffers, int bufferElements)
         batch.vertexBuffer[i].normals = (float *)RL_CALLOC(bufferElements*3*4, sizeof(float));      // 3 float by vertex, 4 vertex by quad
         batch.vertexBuffer[i].colors = (unsigned char *)RL_CALLOC(bufferElements*4*4, sizeof(unsigned char));   // 4 float by color, 4 colors by quad
 #if defined(GRAPHICS_API_OPENGL_33)
-        batch.vertexBuffer[i].indices = (unsigned int *)RL_CALLOC(bufferElements*6, sizeof(unsigned int));      // 6 int by quad (indices)
+        batch.vertexBuffer[i].indices = (unsigned int *)RL_CALLOC(bufferElements*12, sizeof(unsigned int));     // 12 int by quad (strip) (indices)
 #endif
 #if defined(GRAPHICS_API_OPENGL_ES2)
-        batch.vertexBuffer[i].indices = (unsigned short *)RL_CALLOC(bufferElements*6, sizeof(unsigned short));  // 6 int by quad (indices)
+        batch.vertexBuffer[i].indices = (unsigned short *)RL_CALLOC(bufferElements*12, sizeof(unsigned short)); // 12 int by quad (strip) (indices)
 #endif
-
         for (int j = 0; j < (3*4*bufferElements); j++) batch.vertexBuffer[i].vertices[j] = 0.0f;
         for (int j = 0; j < (2*4*bufferElements); j++) batch.vertexBuffer[i].texcoords[j] = 0.0f;
         for (int j = 0; j < (3*4*bufferElements); j++) batch.vertexBuffer[i].normals[j] = 0.0f;
         for (int j = 0; j < (4*4*bufferElements); j++) batch.vertexBuffer[i].colors[j] = 0;
-
-        int k = 0;
-
-        // Indices can be initialized right now
-        for (int j = 0; j < (6*bufferElements); j += 6)
-        {
-            batch.vertexBuffer[i].indices[j] = 4*k;
-            batch.vertexBuffer[i].indices[j + 1] = 4*k + 1;
-            batch.vertexBuffer[i].indices[j + 2] = 4*k + 2;
-            batch.vertexBuffer[i].indices[j + 3] = 4*k;
-            batch.vertexBuffer[i].indices[j + 4] = 4*k + 2;
-            batch.vertexBuffer[i].indices[j + 5] = 4*k + 3;
-
-            k++;
-        }
 
         RLGL.State.vertexCounter = 0;
     }
@@ -2869,10 +2882,10 @@ rlRenderBatch rlLoadRenderBatch(int numBuffers, int bufferElements)
         glGenBuffers(1, &batch.vertexBuffer[i].vboId[4]);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, batch.vertexBuffer[i].vboId[4]);
 #if defined(GRAPHICS_API_OPENGL_33)
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, bufferElements*6*sizeof(int), batch.vertexBuffer[i].indices, GL_STATIC_DRAW);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, bufferElements*12*sizeof(unsigned int), batch.vertexBuffer[i].indices, GL_DYNAMIC_DRAW);
 #endif
 #if defined(GRAPHICS_API_OPENGL_ES2)
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, bufferElements*6*sizeof(short), batch.vertexBuffer[i].indices, GL_STATIC_DRAW);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, bufferElements*12*sizeof(unsigned short), batch.vertexBuffer[i].indices, GL_DYNAMIC_DRAW);
 #endif
     }
 
@@ -3003,6 +3016,15 @@ void rlDrawRenderBatch(rlRenderBatch *batch)
         //}
         //glUnmapBuffer(GL_ARRAY_BUFFER);
 
+        // Upload indices built on the fly during batching (QUADS/QUAD_STRIP)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, batch->vertexBuffer[batch->currentBuffer].vboId[4]);
+#if defined(GRAPHICS_API_OPENGL_33)
+        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, RLGL.State.vertexCounter/2*6*sizeof(unsigned int), batch->vertexBuffer[batch->currentBuffer].indices);
+#endif
+#if defined(GRAPHICS_API_OPENGL_ES2)
+        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, RLGL.State.vertexCounter/2*6*sizeof(unsigned short), batch->vertexBuffer[batch->currentBuffer].indices);
+#endif
+
         // Unbind the current VAO
         if (RLGL.ExtSupported.vao) glBindVertexArray(0);
     }
@@ -3107,23 +3129,32 @@ void rlDrawRenderBatch(rlRenderBatch *batch)
             // NOTE: Batch system accumulates calls by texture0 changes, additional textures are enabled for all the draw calls
             glActiveTexture(GL_TEXTURE0);
 
-            for (int i = 0, vertexOffset = 0; i < batch->drawCounter; i++)
+            for (int i = 0, vertexOffset = 0, indexOffset = 0; i < batch->drawCounter; i++)
             {
                 // Bind current draw call texture, activated as GL_TEXTURE0 and bound to sampler2D texture0 by default
                 glBindTexture(GL_TEXTURE_2D, batch->draws[i].textureId);
 
-                if ((batch->draws[i].mode == RL_LINES) || (batch->draws[i].mode == RL_TRIANGLES)) glDrawArrays(batch->draws[i].mode, vertexOffset, batch->draws[i].vertexCount);
-                else
+                int count = batch->draws[i].vertexCount;
+                switch (batch->draws[i].mode)
                 {
-    #if defined(GRAPHICS_API_OPENGL_33)
-                    // The number of indices to be processed needs to be defined: elementCount*6
-                    // NOTE: The final parameter tells the GPU the offset in bytes from the
-                    // start of the index buffer to the location of the first index to process
-                    glDrawElements(GL_TRIANGLES, batch->draws[i].vertexCount/4*6, GL_UNSIGNED_INT, (GLvoid *)(vertexOffset/4*6*sizeof(GLuint)));
-    #endif
-    #if defined(GRAPHICS_API_OPENGL_ES2)
-                    glDrawElements(GL_TRIANGLES, batch->draws[i].vertexCount/4*6, GL_UNSIGNED_SHORT, (GLvoid *)(vertexOffset/4*6*sizeof(GLushort)));
-    #endif
+                    case RL_LINES:
+                    case RL_TRIANGLES:
+                    case RL_TRIANGLE_STRIP:
+                        glDrawArrays(batch->draws[i].mode, vertexOffset, count);
+                        break;
+                    // RL_QUADS / RL_QUAD_STRIP: draw the element's slice of the sequentially built index buffer
+                    case RL_QUAD_STRIP:;
+                        count = (count >= 4)? (count - 2)*2 : 0;
+                    case RL_QUADS:;
+                        count = count/4*6;
+#if defined(GRAPHICS_API_OPENGL_33)
+                        glDrawElements(GL_TRIANGLES, count, GL_UNSIGNED_INT, (GLvoid *)(indexOffset*sizeof(GLuint)));
+#endif
+#if defined(GRAPHICS_API_OPENGL_ES2)
+                        glDrawElements(GL_TRIANGLES, count, GL_UNSIGNED_SHORT, (GLvoid *)(indexOffset*sizeof(GLushort)));
+#endif
+                        indexOffset += count;
+                        break;
                 }
 
                 vertexOffset += (batch->draws[i].vertexCount + batch->draws[i].vertexAlignment);
