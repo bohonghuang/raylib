@@ -258,10 +258,10 @@ typedef double              GLclampd;
 //#define GL_LINE_LOOP                      0x0002
 //#define GL_LINE_STRIP                     0x0003
 #define GL_TRIANGLES                        0x0004
-//#define GL_TRIANGLE_STRIP                 0x0005
+#define GL_TRIANGLE_STRIP                   0x0005
 //#define GL_TRIANGLE_FAN                   0x0006
 #define GL_QUADS                            0x0007
-//#define GL_QUAD_STRIP                     0x0008
+#define GL_QUAD_STRIP                       0x0008
 //#define GL_POLYGON                        0x0009
 
 #define GL_POINT                            0x1B00
@@ -554,7 +554,9 @@ typedef enum {
     SW_POINTS = GL_POINTS,
     SW_LINES = GL_LINES,
     SW_TRIANGLES = GL_TRIANGLES,
-    SW_QUADS = GL_QUADS
+    SW_QUADS = GL_QUADS,
+    SW_TRIANGLE_STRIP = GL_TRIANGLE_STRIP,
+    SW_QUAD_STRIP = GL_QUAD_STRIP
 } SWdraw;
 
 typedef enum {
@@ -1163,10 +1165,12 @@ static const int SW_PIXELFORMAT_SIZE[SW_PIXELFORMAT_COUNT] =
 static const int SW_PRIMITIVE_VERTEX_COUNT[] =
 {
     // Remember that this is acceptable; these are small indices
-    [SW_POINTS]     = 1,
-    [SW_LINES]      = 2,
-    [SW_TRIANGLES]  = 3,
-    [SW_QUADS]      = 4,
+    [SW_POINTS]         = 1,
+    [SW_LINES]          = 2,
+    [SW_TRIANGLES]      = 3,
+    [SW_QUADS]          = 4,
+    [SW_TRIANGLE_STRIP] = 3,
+    [SW_QUAD_STRIP]     = 4,
 };
 
 //----------------------------------------------------------------------------------
@@ -1602,6 +1606,8 @@ static bool sw_is_draw_mode_valid(int mode)
         case SW_LINES:
         case SW_TRIANGLES:
         case SW_QUADS: result = true; break;
+        case SW_TRIANGLE_STRIP:
+        case SW_QUAD_STRIP: result = true; break;
         default: break;
     }
 
@@ -3741,6 +3747,8 @@ static void sw_poly_fill_render(uint32_t state)
         case SW_LINES: sw_line_render(state, RLSW.primitive.buffer); break;
         case SW_TRIANGLES: sw_triangle_render(state); break;
         case SW_QUADS: sw_quad_render(state); break;
+        case SW_TRIANGLE_STRIP: sw_triangle_render(state); break;
+        case SW_QUAD_STRIP: sw_quad_render(state); break;
         default: break;
     }
 }
@@ -3808,6 +3816,28 @@ static void sw_immediate_set_texcoord(const float texcoord[2])
     RLSW.primitive.texcoord[1] = m[1]*texcoord[0] + m[5]*texcoord[1] + m[13];
 }
 
+static void sw_immediate_render(uint32_t state, int window)
+{
+    const float *ref = RLSW.primitive.buffer[0].color;
+    for (int i = 1; i < window; ++i)
+    {
+        const float *c = RLSW.primitive.buffer[i].color;
+        if (c[0] != ref[0] || c[1] != ref[1] || c[2] != ref[2] || c[3] != ref[3])
+        {
+            state |= SW_STATE_COLOR_INTERP;
+            break;
+        }
+    }
+
+    switch (RLSW.polyMode)
+    {
+        case SW_FILL: sw_poly_fill_render(state); break;
+        case SW_LINE: sw_poly_line_render(state); break;
+        case SW_POINT: sw_poly_point_render(state); break;
+        default: break;
+    }
+}
+
 static void sw_immediate_push_vertex(const float position[4])
 {
     // Check if the draw mode is valid
@@ -3817,8 +3847,22 @@ static void sw_immediate_push_vertex(const float position[4])
         return;
     }
 
-    // Gets the current vertex
-    sw_vertex_t *vertex = &RLSW.primitive.buffer[RLSW.primitive.vertexCount++];
+    // Gets the current vertex; strip modes roll over fixed buffer slots
+    // (each window's last two vertices are retained as the next seed)
+    sw_vertex_t *vertex;
+    switch (RLSW.drawMode)
+    {
+        case SW_TRIANGLE_STRIP:
+            vertex = &RLSW.primitive.buffer[RLSW.primitive.vertexCount >= 2 ? 2 : RLSW.primitive.vertexCount];
+            break;
+        case SW_QUAD_STRIP:
+            vertex = &RLSW.primitive.buffer[RLSW.primitive.vertexCount >= 2 ? 2 + (RLSW.primitive.vertexCount & 1) : RLSW.primitive.vertexCount];
+            break;
+        default:
+            vertex = &RLSW.primitive.buffer[RLSW.primitive.vertexCount];
+            break;
+    }
+    RLSW.primitive.vertexCount++;
 
     // Calculate clip coordinates
 #ifdef SW_HAS_ESP_DSP
@@ -3840,9 +3884,16 @@ static void sw_immediate_push_vertex(const float position[4])
     // Track whether any vertex in this primitive has alpha < 1.0
     RLSW.primitive.hasColorAlpha |= (vertex->color[3] < 1.0f);
 
-    // Immediate rendering of the primitive if the required number is reached
-    if (RLSW.primitive.vertexCount == SW_PRIMITIVE_VERTEX_COUNT[RLSW.drawMode])
+    // Strip modes render a sliding window per new vertex (GL semantics): after
+    // each dispatch the last two vertices are retained as the next window
+    // seed and vertexCount becomes 2 + (count & 1), so it stays within
+    // [window, window + 1] and a TRIANGLE_STRIP odd triangle (GL flips its
+    // winding) is exactly the dispatch where vertexCount == window + 1
+    if (RLSW.primitive.vertexCount >= SW_PRIMITIVE_VERTEX_COUNT[RLSW.drawMode])
     {
+        const int window = SW_PRIMITIVE_VERTEX_COUNT[RLSW.drawMode];
+        const int seed = RLSW.primitive.vertexCount;
+
         uint32_t state = RLSW.rasterState;
 
         // Reduces blend mode costs when it's possible
@@ -3855,28 +3906,40 @@ static void sw_immediate_push_vertex(const float position[4])
             }
         }
 
-        // Determine whether colors should be interpolated
-        const float *ref = RLSW.primitive.buffer[0].color;
-        for (int i = 1; i < RLSW.primitive.vertexCount; ++i)
+        // Strips re-seed the next window from the last two vertices;
+        // renderers mutate the buffer in place during clipping, so save
+        // them beforehand. GL flips odd strip triangles ((n-1, n-2, n))
+        // to keep winding; with the bounded count, seed == window + 1 is
+        // exactly the odd-triangle dispatch
+        switch (RLSW.drawMode)
         {
-            const float *c = RLSW.primitive.buffer[i].color;
-            if (c[0] != ref[0] || c[1] != ref[1] || c[2] != ref[2] || c[3] != ref[3])
-            {
-                state |= SW_STATE_COLOR_INTERP;
+            case SW_TRIANGLE_STRIP:
+            case SW_QUAD_STRIP:;
+                sw_vertex_t vertices_next[2] = { RLSW.primitive.buffer[window - 2], RLSW.primitive.buffer[window - 1] };
+
+                if (seed == window + 1)
+                {
+                    sw_vertex_t tmp = RLSW.primitive.buffer[0];
+                    RLSW.primitive.buffer[0] = RLSW.primitive.buffer[1];
+                    RLSW.primitive.buffer[1] = tmp;
+                    RLSW.primitive.vertexCount = window;    // Renderers read vertexCount as polygon size
+                }
+
+                sw_immediate_render(state, window);
+
+                // Retain the shared edge as the next window seed and carry the
+                // retained vertices' alpha flag into the next window
+                RLSW.primitive.buffer[0] = vertices_next[0];
+                RLSW.primitive.buffer[1] = vertices_next[1];
+                RLSW.primitive.vertexCount = 2 + (seed & 1);
+                RLSW.primitive.hasColorAlpha = (vertices_next[0].color[3] < 1.0f) || (vertices_next[1].color[3] < 1.0f);
                 break;
-            }
+            default:
+                sw_immediate_render(state, window);
+                RLSW.primitive.hasColorAlpha = false;
+                RLSW.primitive.vertexCount = 0;
+                break;
         }
-
-        switch (RLSW.polyMode)
-        {
-            case SW_FILL: sw_poly_fill_render(state); break;
-            case SW_LINE: sw_poly_line_render(state); break;
-            case SW_POINT: sw_poly_point_render(state); break;
-            default: break;
-        }
-
-        RLSW.primitive.hasColorAlpha = false;
-        RLSW.primitive.vertexCount = 0;
     }
 }
 
@@ -3884,6 +3947,8 @@ static void sw_immediate_end(void)
 {
     RLSW.drawMode = SW_DRAW_INVALID;
 }
+
+
 //-------------------------------------------------------------------------------------------
 
 //----------------------------------------------------------------------------------
