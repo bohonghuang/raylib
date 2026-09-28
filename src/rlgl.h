@@ -1544,10 +1544,10 @@ void rlVertex3f(float x, float y, float z)
     // WARNING: Be careful with primitives breaking when launching a new batch!
     // RL_LINES comes in pairs, RL_TRIANGLES come in groups of 3 vertices, RL_QUADS come in groups of 4 vertices
     // Strip modes (RL_TRIANGLE_STRIP, RL_QUAD_STRIP) emit vertices in pairs
-    int prevVertexCounter = RLGL.State.vertexCounter;   // Vertex counter before any forced batch split
     bool overflow = RLGL.State.vertexCounter > (RLGL.currentBatch->vertexBuffer[RLGL.currentBatch->currentBuffer].elementCount*4 - 4);
     int mode = RLGL.currentBatch->draws[RLGL.currentBatch->drawCounter - 1].mode;
     int count = RLGL.currentBatch->draws[RLGL.currentBatch->drawCounter - 1].vertexCount;
+    int vertexCounter = RLGL.State.vertexCounter;
     switch (mode)
     {
         case RL_POINTS:
@@ -1571,11 +1571,11 @@ void rlVertex3f(float x, float y, float z)
 
                     for (int i = 0; i < n; i++)
                     {
-                        int src = (mode == RL_TRIANGLE_FAN)? prevVertexCounter - ((i == 0)? count : 1) : prevVertexCounter - n + i;
-                        memcpy(&buffer->vertices[3*i], &buffer->vertices[3*src], 3*sizeof(float));
-                        memcpy(&buffer->texcoords[2*i], &buffer->texcoords[2*src], 2*sizeof(float));
-                        memcpy(&buffer->normals[3*i], &buffer->normals[3*src], 3*sizeof(float));
-                        memcpy(&buffer->colors[4*i], &buffer->colors[4*src], 4*sizeof(unsigned char));
+                        int src = (mode == RL_TRIANGLE_FAN)? vertexCounter - ((i == 0)? count : 1) : vertexCounter - n + i;
+                        memmove(&buffer->vertices[3*i], &buffer->vertices[3*src], 3*sizeof(float));
+                        memmove(&buffer->texcoords[2*i], &buffer->texcoords[2*src], 2*sizeof(float));
+                        memmove(&buffer->normals[3*i], &buffer->normals[3*src], 3*sizeof(float));
+                        memmove(&buffer->colors[4*i], &buffer->colors[4*src], 4*sizeof(unsigned char));
                     }
 
                     RLGL.State.vertexCounter = n;
